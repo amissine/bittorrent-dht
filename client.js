@@ -12,7 +12,7 @@ var krpc = require('k-rpc')
 var LRU = require('lru')
 
 var ROTATE_INTERVAL = 5 * 60 * 1000 // rotate secrets every 5 minutes
-var BUCKET_OUTDATED_TIMESPAN = 15 * 60 * 1000 // check nodes in bucket in 15 minutes old buckets
+var BUCKET_OUTDATED_TIMESPAN = 5 * 60 * 1000 // check nodes in bucket in 5 minutes old buckets
 
 inherits(DHT, EventEmitter)
 
