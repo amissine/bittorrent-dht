@@ -12,6 +12,7 @@ var krpc = require('k-rpc')
 var LRU = require('lru')
 
 var ROTATE_INTERVAL = 5 * 60 * 1000 // rotate secrets every 5 minutes
+var BUCKET_OUTDATED_TIMESPAN = 15 * 60 * 1000 // check nodes in bucket in 15 minutes old buckets
 
 inherits(DHT, EventEmitter)
 
@@ -36,12 +37,17 @@ function DHT (opts) {
   this._verify = opts.verify || null
   this._host = opts.host || null
   this._interval = setInterval(rotateSecrets, ROTATE_INTERVAL)
+  this._bucketCheckInterval = null
   this._hash = opts.hash || sha1
 
   this.listening = false
   this.destroyed = false
   this.nodeId = this._rpc.id
   this.nodes = this._rpc.nodes
+
+  this.nodes.on('ping', function (nodes) {
+    self._checkNodes(nodes)
+  })
 
   process.nextTick(bootstrap)
 
@@ -79,13 +85,83 @@ function DHT (opts) {
   }
 }
 
+DHT.prototype._setBucketCheckInterval = function () {
+  var self = this
+  var interval = 1 * 60 * 1000 // check age of bucket every minute
+
+  this._bucketCheckInterval = setInterval(function () {
+    const diff = Date.now() - self._rpc.nodes.lastChange
+
+    if (diff >= BUCKET_OUTDATED_TIMESPAN) {
+      self._checkAndRemoveNodes(self.nodes.toArray(), function () {
+        if (self.nodes.toArray().length < 1) {
+          // node is currently isolated,
+          // retry with initial bootstrap nodes
+          self._bootstrap(true)
+        }
+      })
+    }
+  }, interval)
+}
+
+DHT.prototype.removeBucketCheckInterval = function () {
+  clearInterval(this._bucketCheckInterval)
+}
+
+DHT.prototype.updateBucketTimestamp = function () {
+  this._rpc.nodes.lastChange = Date.now()
+}
+
+DHT.prototype._checkAndRemoveNodes = function (nodes, cb) {
+  var self = this
+
+  this._checkNodes(nodes, function (_, node) {
+    if (node) self.removeNode(node.id)
+    cb(null)
+  })
+}
+
+DHT.prototype._checkNodes = function (nodes, cb) {
+  var self = this
+
+  function test (acc) {
+    if (!acc.length) {
+      return cb(null)
+    }
+
+    var current = acc.pop()
+
+    self._sendPing(current, function (err) {
+      if (!err) {
+        self.updateBucketTimestamp()
+        return test(acc)
+      }
+
+      // retry
+      self._sendPing(current, function (er) {
+        if (err) {
+          return cb(null, current)
+        }
+
+        self.updateBucketTimestamp()
+        return test(acc)
+      })
+    })
+  }
+
+  test(nodes)
+}
+
 DHT.prototype.addNode = function (node) {
   var self = this
   if (node.id) {
     node.id = toBuffer(node.id)
     var old = !!this._rpc.nodes.get(node.id)
     this._rpc.nodes.add(node)
-    if (!old) this.emit('node', node)
+    if (!old) {
+      this.emit('node', node)
+      this.updateBucketTimestamp()
+    }
     return
   }
   this._sendPing(node, function (_, node) {
@@ -98,11 +174,14 @@ DHT.prototype.removeNode = function (id) {
 }
 
 DHT.prototype._sendPing = function (node, cb) {
+  var self = this
+
   this._rpc.query(node, {q: 'ping'}, function (err, pong, node) {
     if (err) return cb(err)
     if (!pong.r || !pong.r.id || !Buffer.isBuffer(pong.r.id) || pong.r.id.length !== 20) {
       return cb(new Error('Bad reply'))
     }
+    self.updateBucketTimestamp()
     cb(null, {
       id: pong.r.id,
       host: node.host || node.address,
@@ -355,6 +434,9 @@ DHT.prototype.address = function () {
 // listen([port], [address], [onlistening])
 DHT.prototype.listen = function () {
   this._rpc.bind.apply(this._rpc, arguments)
+
+  this.updateBucketTimestamp()
+  this._setBucketCheckInterval()
 }
 
 DHT.prototype.destroy = function (cb) {
@@ -365,6 +447,7 @@ DHT.prototype.destroy = function (cb) {
   this.destroyed = true
   var self = this
   clearInterval(this._interval)
+  clearInterval(this._bucketCheckInterval)
   this._debug('destroying')
   this._rpc.destroy(function () {
     self.emit('close')
@@ -527,6 +610,8 @@ DHT.prototype._bootstrap = function (populate) {
   }, ready)
 
   function ready () {
+    if (self.ready) return
+
     self._debug('emit ready')
     self.ready = true
     self.emit('ready')
