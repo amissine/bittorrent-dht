@@ -47,7 +47,7 @@ function DHT (opts) {
   this.nodes = this._rpc.nodes
 
   this.nodes.on('ping', function (nodes) {
-    self._checkNodes(nodes)
+    self._checkNodes(nodes, function () {})
   })
 
   process.nextTick(bootstrap)
