@@ -46,10 +46,6 @@ function DHT (opts) {
   this.nodeId = this._rpc.id
   this.nodes = this._rpc.nodes
 
-  this.nodes.on('ping', function (nodes) {
-    self._checkNodes(nodes, function () {})
-  })
-
   process.nextTick(bootstrap)
 
   EventEmitter.call(this)
